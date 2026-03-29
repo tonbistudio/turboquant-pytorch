@@ -199,6 +199,54 @@ pip install torch --index-url https://download.pytorch.org/whl/cu128
 - [QJL Reference Implementation](https://github.com/amirzandieh/QJL) — Original CUDA implementation by the QJL authors
 - [PolarQuant Reference Implementation](https://github.com/ericshwu/PolarQuant)
 
+## Contributions & Improvements
+
+This fork adds three fixes over the original repo.
+All changes preserve full backward compatibility — existing tests pass unchanged.
+
+### Fix 1: Package structure (`turboquant/` subdirectory)
+
+The original repo placed all modules at root with relative imports (`from .lloyd_max import ...`),
+which prevented running `test_turboquant.py` or `validate.py` directly. Modules have been moved
+into a proper `turboquant/` package directory, matching the import paths already used in the test
+scripts. This is the same structural change proposed in PR #3.
+
+### Fix 2: `PackedKVCompressor` — actual memory compression
+
+**The original `TurboQuantCompressorV2` did not achieve the compression ratios it reported.**
+
+`compress()` stored `k_mse` as a full `float16` tensor of shape `(B, H, S, D)` alongside the
+QJL signs (stored as `int8` — 8 bits per 1-bit sign). For `d=128` this cost **386 bytes/vector
+vs 256 bytes fp16 — 38% larger than uncompressed**. The `validate.py` memory accounting was
+correct (reporting theoretical indices size), but the actual PyTorch tensors contradicted it.
+
+`PackedKVCompressor` fixes this by:
+- Storing **MSE indices** (not reconstructed vectors), bit-packed `floor(8/mse_bits)` per byte
+- Packing **QJL sign bits** 8 per byte via bitwise operations
+- Recomputing `k_mse` on the fly during `asymmetric_attention_scores()`
+
+Result (`d=128`, `H=2`, `S=4096`):
+
+| Config | fp16 | V2 (original) | PackedKVCompressor |
+|--------|------|---------------|--------------------:|
+| 2-bit  | 2048 KB | 3088 KB (**-38%**) | 288 KB (**7.1x**) |
+| 3-bit  | 2048 KB | 3088 KB (**-38%**) | 416 KB (**4.9x**) |
+| 4-bit  | 2048 KB | 3088 KB (**-38%**) | 672 KB (**3.1x**) |
+
+Attention score accuracy (cosine similarity vs fp16 ground truth) is identical to V2.
+
+### Fix 3: Eliminated duplicate codebook solver
+
+`TurboQuantCompressorV2` and `TurboQuantCompressorMSE` each had a private `_solve_codebook()`
+method copy-pasted from `lloyd_max.py`. Both now import `LloydMaxCodebook` directly,
+removing ~60 lines of duplicated code and ensuring codebook consistency.
+
+### New files
+
+| File | Description |
+|------|-------------|
+| `test_packed.py` | Memory and accuracy comparison: V2 vs PackedKVCompressor |
+
 ## License
 
 MIT
