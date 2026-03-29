@@ -10,7 +10,7 @@ import os
 import sys
 
 # Allow running as `python validate.py` from within the package directory
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 from turboquant.compressors import TurboQuantCompressorV2, TurboQuantCompressorMSE

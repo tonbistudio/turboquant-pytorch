@@ -199,6 +199,108 @@ pip install torch --index-url https://download.pytorch.org/whl/cu128
 - [QJL Reference Implementation](https://github.com/amirzandieh/QJL) — Original CUDA implementation by the QJL authors
 - [PolarQuant Reference Implementation](https://github.com/ericshwu/PolarQuant)
 
+## Contributions & Improvements
+
+This fork adds three fixes over the original repo.
+All changes preserve full backward compatibility — existing tests pass unchanged.
+
+### Fix 1: Package structure (`turboquant/` subdirectory)
+
+The original repo placed all modules at root with relative imports (`from .lloyd_max import ...`),
+which prevented running `test_turboquant.py` or `validate.py` directly. Modules have been moved
+into a proper `turboquant/` package directory, matching the import paths already used in the test
+scripts. This is the same structural change proposed in PR #3.
+
+### Fix 2: `PackedKVCompressor` — actual memory compression
+
+**The original `TurboQuantCompressorV2` did not achieve the compression ratios it reported.**
+
+`compress()` stored `k_mse` as a full `float16` tensor of shape `(B, H, S, D)` alongside the
+QJL signs (stored as `int8` — 8 bits per 1-bit sign). For `d=128` this cost **386 bytes/vector
+vs 256 bytes fp16 — 38% larger than uncompressed**. The `validate.py` memory accounting was
+correct (reporting theoretical indices size), but the actual PyTorch tensors contradicted it.
+
+`PackedKVCompressor` fixes this by:
+- Storing **MSE indices** (not reconstructed vectors), bit-packed `floor(8/mse_bits)` per byte
+- Packing **QJL sign bits** 8 per byte via bitwise operations
+- Recomputing `k_mse` on the fly during `asymmetric_attention_scores()`
+
+Result (`d=128`, `H=2`, `S=4096`):
+
+| Config | fp16 | V2 (original) | PackedKVCompressor |
+|--------|------|---------------|--------------------:|
+| 2-bit  | 2048 KB | 3088 KB (**-38%**) | 288 KB (**7.1x**) |
+| 3-bit  | 2048 KB | 3088 KB (**-38%**) | 416 KB (**4.9x**) |
+| 4-bit  | 2048 KB | 3088 KB (**-38%**) | 672 KB (**3.1x**) |
+
+Attention score accuracy (cosine similarity vs fp16 ground truth) is identical to V2.
+
+### Fix 3: Eliminated duplicate codebook solver
+
+`TurboQuantCompressorV2` and `TurboQuantCompressorMSE` each had a private `_solve_codebook()`
+method copy-pasted from `lloyd_max.py`. Both now import `LloydMaxCodebook` directly,
+removing ~60 lines of duplicated code and ensuring codebook consistency.
+
+### Improvement: `HadamardRotation` — O(d log d) rotation with O(d) storage
+
+The original rotation uses QR decomposition of a random Gaussian matrix:
+- **Storage**: `d × d × float32` = 64 KB at `d=128`
+- **Apply**: dense GEMM = `d²` = 16,384 multiply-adds per vector
+
+`HadamardRotation` (in `turboquant/hadamard.py`) replaces this with the
+**Randomized Hadamard Transform** (Ailon & Chazelle, 2009):
+`rotate(x) = H @ diag(signs) @ x`, where `H` is the normalized Walsh-Hadamard matrix.
+
+- **Storage**: `d × float32` = 512 bytes at `d=128` — **128× less**
+- **Apply**: butterfly algorithm = `d log₂d` = 896 ops per vector — **18× fewer ops**
+- **Inverse**: `unrotate(y) = diag(signs) @ H @ y` (H is self-inverse when normalized)
+
+Both approaches give identical theoretical guarantees: after rotation, each coordinate
+of a unit vector follows the same N(0, 1/d) distribution required by Lloyd-Max quantization.
+
+**GPU note**: At `d=128` on an RTX 4070 Ti, CUDA tensor cores make the dense QR GEMM
+(0.02 ms) faster than the sequential butterfly (0.26 ms). `HadamardRotation` is the
+preferred default for:
+- CPU inference
+- Models with large head dims (`d ≥ 512`)
+- Memory-constrained deployments (128× smaller rotation state)
+
+`PackedKVCompressor` defaults to `use_hadamard=True`. Pass `use_hadamard=False` to use
+QR rotation instead. Both options expose identical `.rotate()` / `.unrotate()` interfaces
+via `HadamardRotation` and `QRRotation` respectively.
+
+```python
+from turboquant import PackedKVCompressor, HadamardRotation, make_rotation
+
+# Default: Hadamard rotation (O(d log d), 512B storage at d=128)
+compressor = PackedKVCompressor(head_dim=128, bits=3, seed=42, device="cuda")
+
+# Explicit QR rotation (O(d^2), 64KB storage at d=128) — faster on GPU with tensor cores
+compressor = PackedKVCompressor(head_dim=128, bits=3, seed=42, device="cuda", use_hadamard=False)
+
+# Standalone rotation objects
+rot = make_rotation(d=128, seed=42, device="cuda")  # auto-selects Hadamard for d=2^k
+y = rot.rotate(x)
+x_hat = rot.unrotate(y)
+```
+
+### New files
+
+| File | Description |
+|------|-------------|
+| `turboquant/hadamard.py` | `HadamardRotation`, `QRRotation`, `make_rotation`, `hadamard_transform` |
+| `test_packed.py` | Memory and accuracy comparison: V2 vs PackedKVCompressor |
+
+### Benchmark (RTX 4070 Ti, CUDA 12.8, PyTorch 2.11)
+
+```
+GPU: NVIDIA GeForce RTX 4070 Ti
+Rotate 8192x128:  Hadamard=0.263ms  QR=0.021ms
+Storage:          Hadamard=512B     QR=64KB  (128x smaller)
+Hadamard coord variance: 0.0078 (= 1/d = 1/128, as theory predicts)
+Hadamard invert error:   7.45e-08 (machine precision)
+```
+
 ## License
 
 MIT
