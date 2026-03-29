@@ -27,6 +27,7 @@ import math
 
 from .lloyd_max import LloydMaxCodebook
 from .turboquant import generate_rotation_matrix, generate_qjl_matrix
+from .hadamard import make_rotation, HadamardRotation
 
 
 class TurboQuantCompressorV2:
@@ -159,13 +160,17 @@ class PackedKVCompressor:
     + signs as int8 (128 bytes) + norm (2 bytes) = 386 bytes -- LARGER than fp16.
     """
 
-    def __init__(self, head_dim: int, bits: int, seed: int, device: str = "cpu"):
+    def __init__(self, head_dim: int, bits: int, seed: int, device: str = "cpu",
+                 use_hadamard: bool = True):
         self.head_dim = head_dim
         self.bits = bits
         self.mse_bits = max(bits - 1, 1)
         self.device = device
 
-        self.Pi = generate_rotation_matrix(head_dim, seed=seed, device=device)
+        # Rotation: Hadamard O(d log d) when d is power-of-2, else QR O(d^2)
+        self.rot = make_rotation(head_dim, seed=seed, device=device, hadamard=use_hadamard)
+        self.use_hadamard = isinstance(self.rot, HadamardRotation)
+
         codebook = LloydMaxCodebook(head_dim, self.mse_bits)
         self.centroids = codebook.centroids.to(device)
         self.S = generate_qjl_matrix(head_dim, m=head_dim, seed=seed + 10000, device=device)
@@ -188,13 +193,13 @@ class PackedKVCompressor:
         vec_norms = torch.norm(flat, dim=-1)             # (N,)
         flat_norm = flat / (vec_norms.unsqueeze(-1) + 1e-8)
 
-        # Stage 1: rotate + Lloyd-Max quantize
-        rotated = flat_norm @ self.Pi.T                  # (N, D)
+        # Stage 1: rotate + Lloyd-Max quantize  (Hadamard O(d log d) or QR O(d^2))
+        rotated = self.rot.rotate(flat_norm)             # (N, D)
         diffs = rotated.unsqueeze(-1) - self.centroids   # (N, D, n_levels)
         indices = diffs.abs().argmin(dim=-1).to(torch.uint8)  # (N, D)
 
         # Reconstruct for residual (not stored — recomputed during inference)
-        k_mse = self.centroids[indices.long()] @ self.Pi * vec_norms.unsqueeze(-1)
+        k_mse = self.rot.unrotate(self.centroids[indices.long()]) * vec_norms.unsqueeze(-1)
         residual = flat - k_mse
         residual_norm = torch.norm(residual, dim=-1)     # (N,)
 
@@ -267,8 +272,8 @@ class PackedKVCompressor:
         if idx_pad:
             indices = indices[:, :D]
 
-        # Reconstruct k_mse from unpacked indices
-        k_mse = (self.centroids[indices] @ self.Pi) * v_norm   # (N, D)
+        # Reconstruct k_mse from unpacked indices  (inverse rotation: Hadamard or QR)
+        k_mse = self.rot.unrotate(self.centroids[indices]) * v_norm   # (N, D)
         k_mse = k_mse.reshape(B, H, S_k, D).float()
 
         # Unpack sign bits -> {-1, +1}
