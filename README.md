@@ -91,6 +91,11 @@ QJL does work for **vector search** (no softmax), which is the paper's other use
 pip install -r requirements.txt
 ```
 
+For editable local development:
+```bash
+pip install -e .
+```
+
 For CUDA PyTorch:
 ```bash
 pip install torch --index-url https://download.pytorch.org/whl/cu128

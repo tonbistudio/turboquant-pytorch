@@ -214,11 +214,15 @@ def main():
 
     configs = [
         {"fp16": True, "label": "FP16 (baseline)"},
-        {"key_bits": 4, "value_bits": 2, "residual_window": 0,   "label": "V3 K4/V2"},
-        {"key_bits": 4, "value_bits": 3, "residual_window": 0,   "label": "V3 K4/V3"},
-        {"key_bits": 4, "value_bits": 4, "residual_window": 0,   "label": "V3 K4/V4"},
-        {"key_bits": 3, "value_bits": 2, "residual_window": 0,   "label": "V3 K3/V2"},
-        {"key_bits": 3, "value_bits": 3, "residual_window": 0,   "label": "V3 K3/V3"},
+        # Known-good configs from the corrected README. These should be first so
+        # users see expected successful behavior before the aggressive ablations.
+        {"key_bits": 6, "value_bits": 4, "residual_window": 128, "label": "V3 K6/V4 rw=128"},
+        {"key_bits": 8, "value_bits": 4, "residual_window": 128, "label": "V3 K8/V4 rw=128"},
+        {"key_bits": 4, "value_bits": 4, "residual_window": 128, "label": "V3 K4/V4 rw=128"},
+        # Stress tests: these are expected to degrade or miss on Qwen2.5-3B.
+        {"key_bits": 4, "value_bits": 2, "residual_window": 0,   "label": "V3 K4/V2 rw=0"},
+        {"key_bits": 4, "value_bits": 3, "residual_window": 0,   "label": "V3 K4/V3 rw=0"},
+        {"key_bits": 3, "value_bits": 2, "residual_window": 0,   "label": "V3 K3/V2 rw=0"},
     ]
 
     results = {}

@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "turboquant-pytorch"
+version = "0.1.0"
+description = "PyTorch implementation of TurboQuant KV-cache compression"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+dependencies = [
+    "torch>=2.0.0",
+    "scipy>=1.10.0",
+    "transformers>=4.40.0",
+    "accelerate>=0.25.0",
+    "bitsandbytes>=0.43.0",
+]
+
+[tool.setuptools.packages.find]
+include = ["turboquant*"]
